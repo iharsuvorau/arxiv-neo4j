@@ -1,0 +1,16 @@
+services:
+  neo4j:
+    image: neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - ./data:/data
+      - ./import:/import
+      - ./logs:/logs
+      - ./plugins:/plugins
+      - ./products:/products
+      - ./conf:/conf
+    environment:
+      NEO4J_AUTH: none
+    restart: "no"

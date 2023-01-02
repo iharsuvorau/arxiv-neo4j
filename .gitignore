@@ -1,0 +1,10 @@
+.DS_Store
+.idea/
+data/
+import/
+logs/
+plugins/
+conf/
+products/
+venv/
+dataset/
