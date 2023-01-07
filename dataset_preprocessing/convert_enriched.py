@@ -1,4 +1,5 @@
 import itertools
+from ast import literal_eval
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -17,6 +18,10 @@ def save_df_to_file(
         columns: Optional[Iterable] = None,
 ) -> None:
     df.to_csv(file_path, index=False, header=header, columns=columns if columns else df.columns)
+
+
+def infer_separator(file_path: Path) -> str:
+    return '\t' if file_path.suffix == '.tsv' else ','
 
 
 def process_venue_entities(venues_path: Path, output_dir: Path) -> None:
@@ -159,6 +164,36 @@ def process_publication_entities(
     save_df_to_file(df, content_path, columns=columns)
 
 
+def process_scientific_domain_entities(domains_path: Path, output_dir: Path):
+    df = pd.read_csv(domains_path)
+
+    df = df[['arxiv_category', 'major_field', 'sub_category', 'exact_category']]
+
+    df.rename(columns={
+        'arxiv_category': 'arxiv_category:ID(Arxiv-Category-ID)',
+    }, inplace=True)
+
+    df[':LABEL'] = 'ScientificDomain'
+
+    # TODO: we may want to reconsider dropping duplicates and create multiple references instead
+    df = df.drop_duplicates(subset=['arxiv_category:ID(Arxiv-Category-ID)'])
+
+    header_path = output_dir / 'domains_header.csv'
+    content_path = output_dir / 'domains.csv'
+
+    header = 'arxiv_category:ID(Arxiv-Category-ID),major_field,sub_category,exact_category,:LABEL'
+    save_str_to_file(header, header_path)
+
+    columns = [
+        'arxiv_category:ID(Arxiv-Category-ID)',
+        'major_field',
+        'sub_category',
+        'exact_category',
+        ':LABEL',
+    ]
+    save_df_to_file(df, content_path, columns=columns)
+
+
 def process_author_of_relationships(df: pd.DataFrame, output_dir: Path):
     df = df[['author_ID', 'publication_ID']]
 
@@ -183,7 +218,7 @@ def process_author_of_relationships(df: pd.DataFrame, output_dir: Path):
     save_df_to_file(df, content_path, columns=columns)
 
 
-def process_collaborates_with_relationships(df: pd.DataFrame, output_dir: Path):
+def process_author_collaborates_with_relationships(df: pd.DataFrame, output_dir: Path):
     df = df[['author_ID', 'publication_ID']]
 
     result = pd.DataFrame(columns=['author_ID_1', 'author_ID_2'])
@@ -202,8 +237,8 @@ def process_collaborates_with_relationships(df: pd.DataFrame, output_dir: Path):
 
     result[':TYPE'] = 'COLLABORATES_WITH'
 
-    header_path = output_dir / 'collaborates_with_header.csv'
-    content_path = output_dir / 'collaborates_with.csv'
+    header_path = output_dir / 'author_collaborates_with_header.csv'
+    content_path = output_dir / 'author_collaborates_with.csv'
 
     header = ':START_ID(Author-ID),:END_ID(Author-ID),:TYPE'
     save_str_to_file(header, header_path)
@@ -216,7 +251,7 @@ def process_collaborates_with_relationships(df: pd.DataFrame, output_dir: Path):
     save_df_to_file(result, content_path, columns=columns)
 
 
-def process_author_affiliation_relationships(author_to_affiliations_path: Path, output_dir: Path):
+def process_author_works_at_relationships(author_to_affiliations_path: Path, output_dir: Path):
     df = pd.read_csv(author_to_affiliations_path, index_col=0)
 
     df = df[['author_ID', 'affiliation_ID']]
@@ -242,7 +277,7 @@ def process_author_affiliation_relationships(author_to_affiliations_path: Path, 
     save_df_to_file(df, content_path, columns=columns)
 
 
-def process_published_in_relationships(publications_to_venues_path: Path, output_dir: Path):
+def process_publication_published_in_relationships(publications_to_venues_path: Path, output_dir: Path):
     df = pd.read_csv(publications_to_venues_path, index_col=0)
 
     df = df[['publication_ID', 'venue_ID']]
@@ -268,6 +303,209 @@ def process_published_in_relationships(publications_to_venues_path: Path, output
     save_df_to_file(df, content_path, columns=columns)
 
 
+def process_publication_belongs_to_domain_relationships(
+        publications_to_domains_path: Path,
+        publications_path: Path,
+        arxiv_categories_path: Path,
+        domains_path: Path,
+        output_dir: Path
+):
+    pub_to_domains_df = pd.read_csv(publications_to_domains_path, sep='\t')  # publication_ID, arxiv_category_ID
+    arxiv_categories_df = pd.read_csv(arxiv_categories_path)  # arxiv_category_ID, arxiv_category
+    domains_df = pd.read_csv(
+        domains_path)  # domain_id, grouping_id, major_field, sub_category, exact_category, arxiv_category
+    pub_df = pd.read_csv(publications_path, index_col=0)[['publication_ID']]
+
+    pub_to_domains_df = pub_to_domains_df.merge(arxiv_categories_df, on='arxiv_category_ID')
+    pub_to_domains_df = pub_to_domains_df.merge(domains_df, on='arxiv_category')
+
+    pub_to_domains_df = pub_to_domains_df[['publication_ID', 'arxiv_category']]
+
+    # Removing publications with IDs that are not in the publications.csv file, i.e., not in the database
+    pub_to_domains_df = pub_to_domains_df.merge(pub_df, on='publication_ID')
+
+    pub_to_domains_df = pub_to_domains_df.rename(columns={
+        'publication_ID': ':START_ID(Publication-ID)',
+        'arxiv_category': ':END_ID(Arxiv-Category-ID)',
+    })
+
+    pub_to_domains_df[':TYPE'] = 'BELONGS_TO'
+
+    header_path = output_dir / 'belongs_to_header.csv'
+    content_path = output_dir / 'belongs_to.csv'
+
+    header = ':START_ID(Publication-ID),:END_ID(Arxiv-Category-ID),:TYPE'
+    save_str_to_file(header, header_path)
+
+    columns = [
+        ':START_ID(Publication-ID)',
+        ':END_ID(Arxiv-Category-ID)',
+        ':TYPE',
+    ]
+    save_df_to_file(pub_to_domains_df, content_path, columns=columns)
+
+
+def process_publication_cited_by_relationships(citations_path: Path, publications_path: Path, output_dir: Path):
+    sep = '\t' if citations_path.suffix == '.tsv' else ','
+    df = pd.read_csv(citations_path, sep=sep)  # publication_ID, citing_publication_DOI (array)
+
+    df['citing_publication_DOI'] = df['citing_publication_DOI'].apply(literal_eval)
+    df = df.explode('citing_publication_DOI')
+
+    pub_df = pd.read_csv(publications_path, index_col=0)[['publication_ID', 'DOI']]
+
+    # Removing publications that are not in the publications.csv file
+    df = df.merge(pub_df, left_on='citing_publication_DOI', right_on='DOI')
+
+    df = df[['publication_ID_x', 'citing_publication_DOI']]
+
+    df = df.rename(columns={
+        'publication_ID_x': ':START_ID(Publication-ID)',
+        'citing_publication_DOI': ':END_ID(Publication-ID)',
+    })
+
+    df[':TYPE'] = 'CITED_BY'
+
+    header_path = output_dir / 'cited_by_header.csv'
+    content_path = output_dir / 'cited_by.csv'
+
+    header = ':START_ID(Publication-ID),:END_ID(Publication-ID),:TYPE'
+    save_str_to_file(header, header_path)
+
+    columns = [
+        ':START_ID(Publication-ID)',
+        ':END_ID(Publication-ID)',
+        ':TYPE',
+    ]
+    save_df_to_file(df, content_path, columns=columns)
+
+
+def process_affiliation_covers_scientific_domain_relationships(
+        publications_to_affiliations_path: Path,
+        publications_to_domains_path: Path,
+        output_dir: Path
+):
+    # pub2affiliation_ID, publication_ID, affiliation_ID
+    publications_to_affiliations_df = pd.read_csv(
+        publications_to_affiliations_path, sep=infer_separator(publications_to_affiliations_path), index_col=0)
+    publications_to_affiliations_df = publications_to_affiliations_df[['publication_ID', 'affiliation_ID']]
+
+    # publication_ID, arxiv_category_ID
+    publications_to_domains_df = pd.read_csv(
+        publications_to_domains_path, sep=infer_separator(publications_to_domains_path))
+
+    publications_to_affiliations_df = publications_to_affiliations_df.merge(
+        publications_to_domains_df, on='publication_ID')
+
+    df = publications_to_affiliations_df[['affiliation_ID', 'arxiv_category_ID']]
+    df = df.drop_duplicates(['affiliation_ID', 'arxiv_category_ID'])
+
+    df = df.rename(columns={
+        'affiliation_ID': ':START_ID(Affiliation-ID)',
+        'arxiv_category_ID': ':END_ID(Arxiv-Category-ID)',
+    })
+
+    df[':TYPE'] = 'COVERS'
+
+    header_path = output_dir / 'covers_header.csv'
+    content_path = output_dir / 'covers.csv'
+
+    header = ':START_ID(Affiliation-ID),:END_ID(Arxiv-Category-ID),:TYPE'
+    save_str_to_file(header, header_path)
+
+    columns = [
+        ':START_ID(Affiliation-ID)',
+        ':END_ID(Arxiv-Category-ID)',
+        ':TYPE',
+    ]
+    save_df_to_file(df, content_path, columns=columns)
+
+
+def process_affiliation_collaborates_with_relationships(
+        author_to_publications_path: Path,
+        publications_to_affiliations_path: Path,
+        output_dir: Path
+):
+    # author_ID, publication_ID
+    author_to_publications_df = pd.read_csv(
+        author_to_publications_path, sep=infer_separator(author_to_publications_path), index_col=0)
+    author_to_publications_df = author_to_publications_df[['author_ID', 'publication_ID']]
+
+    # publication_ID, affiliation_ID
+    publications_to_affiliations_df = pd.read_csv(
+        publications_to_affiliations_path, sep=infer_separator(publications_to_affiliations_path), index_col=0)
+    publications_to_affiliations_df = publications_to_affiliations_df[['publication_ID', 'affiliation_ID']]
+
+    # author_ID, publication_ID, affiliation_ID
+    df = author_to_publications_df.merge(publications_to_affiliations_df, on='publication_ID')
+
+    collaboration_df = pd.DataFrame(columns=[':START_ID(Affiliation-ID)', ':END_ID(Affiliation-ID)', ':TYPE'])
+
+    for _, group in df.groupby('publication_ID'):
+        collaborators = group['affiliation_ID'].unique()
+        ids_permutations = list(itertools.permutations(collaborators, 2))
+        rows = [[start, end, 'COLLABORATES_WITH'] for start, end in ids_permutations]
+        collaboration_df = pd.concat([collaboration_df, pd.DataFrame(rows, columns=collaboration_df.columns)])
+
+    collaboration_df = collaboration_df.drop_duplicates()
+
+    header_path = output_dir / 'affiliation_collaborates_with_header.csv'
+    content_path = output_dir / 'affiliation_collaborates_with.csv'
+
+    header = ':START_ID(Affiliation-ID),:END_ID(Affiliation-ID),:TYPE'
+    save_str_to_file(header, header_path)
+
+    columns = [
+        ':START_ID(Affiliation-ID)',
+        ':END_ID(Affiliation-ID)',
+        ':TYPE',
+    ]
+    save_df_to_file(collaboration_df, content_path, columns=columns)
+
+
+def process_affiliation_publishes_in_relationships(
+        publications_to_affiliations_path: Path,
+        publications_to_venues_path: Path,
+        output_dir: Path
+):
+    # pub2affiliation_ID, publication_ID, affiliation_ID
+    publications_to_affiliations_df = pd.read_csv(
+        publications_to_affiliations_path, sep=infer_separator(publications_to_affiliations_path), index_col=0)
+    publications_to_affiliations_df = publications_to_affiliations_df[['publication_ID', 'affiliation_ID']]
+
+    # publication_ID, venue_ID
+    publications_to_venues_df = pd.read_csv(
+        publications_to_venues_path, sep=infer_separator(publications_to_venues_path))
+    publications_to_venues_df = publications_to_venues_df[['publication_ID', 'venue_ID']]
+
+    # publication_ID, affiliation_ID, venue_ID
+    df = publications_to_affiliations_df.merge(publications_to_venues_df, on='publication_ID')
+
+    # affiliation_ID, venue_ID
+    df = df[['affiliation_ID', 'venue_ID']]
+    df = df.drop_duplicates(['affiliation_ID', 'venue_ID'])
+
+    df = df.rename(columns={
+        'affiliation_ID': ':START_ID(Affiliation-ID)',
+        'venue_ID': ':END_ID(Venue-ID)',
+    })
+
+    df[':TYPE'] = 'PUBLISHES_IN'
+
+    header_path = output_dir / 'affiliation_publishes_in_header.csv'
+    content_path = output_dir / 'affiliation_publishes_in.csv'
+
+    header = ':START_ID(Affiliation-ID),:END_ID(Venue-ID),:TYPE'
+    save_str_to_file(header, header_path)
+
+    columns = [
+        ':START_ID(Affiliation-ID)',
+        ':END_ID(Venue-ID)',
+        ':TYPE',
+    ]
+    save_df_to_file(df, content_path, columns=columns)
+
+
 if __name__ == '__main__':
     output_dir = Path('../import/enriched')
     output_dir.mkdir(exist_ok=True)
@@ -285,12 +523,33 @@ if __name__ == '__main__':
     publications_to_venues_path = Path('../dataset/enriched/pub2venue_.csv')
     process_publication_entities(publications_path, publications_to_venues_path, venues_path, output_dir)
 
+    domains_path = Path('../dataset/enriched/lookup_table_domains.csv')
+    process_scientific_domain_entities(domains_path, output_dir)
+
     author_to_publications_path = Path('../dataset/enriched/author2pub.csv')
     a2p_df = pd.read_csv(author_to_publications_path, index_col=0)
     process_author_of_relationships(a2p_df, output_dir)
-    process_collaborates_with_relationships(a2p_df, output_dir)
+    process_author_collaborates_with_relationships(a2p_df, output_dir)
 
     author_to_affiliations_path = Path('../dataset/enriched/author2affiliation.csv')
-    process_author_affiliation_relationships(author_to_affiliations_path, output_dir)
+    process_author_works_at_relationships(author_to_affiliations_path, output_dir)
 
-    process_published_in_relationships(publications_to_venues_path, output_dir)
+    process_publication_published_in_relationships(publications_to_venues_path, output_dir)
+
+    publications_to_domains_path = Path('../dataset/enriched/publication2arxiv_df.tsv')
+    arxiv_categories_path = Path('../dataset/enriched/arxiv_categories.csv')
+    process_publication_belongs_to_domain_relationships(
+        publications_to_domains_path, publications_path, arxiv_categories_path, domains_path, output_dir)
+
+    citations_path = Path('../dataset/enriched/citing_pub_df200000.tsv')
+    process_publication_cited_by_relationships(citations_path, publications_path, output_dir)
+
+    publications_to_affiliations_path = Path('../dataset/enriched/pub2affiliation.csv')
+    process_affiliation_covers_scientific_domain_relationships(
+        publications_to_affiliations_path, publications_to_domains_path, output_dir)
+
+    process_affiliation_collaborates_with_relationships(
+        author_to_publications_path, publications_to_affiliations_path, output_dir)
+
+    process_affiliation_publishes_in_relationships(
+        publications_to_affiliations_path, publications_to_venues_path, output_dir)
